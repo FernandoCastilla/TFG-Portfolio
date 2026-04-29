@@ -1,0 +1,31 @@
+# Dependencias — se instalan dentro del contenedor
+node_modules
+vendor
+
+# Entorno local de desarrollo
+.env
+compose.yaml
+docker-compose.override.yml
+
+# Assets sin compilar — los compila el stage de Node
+resources/js
+resources/css
+
+# Storage local — se monta como volumen en producción
+storage/app/proyectos_ugr.json
+storage/app/tareas_ugr.json
+storage/app/sync_log.json
+
+# Git y herramientas de desarrollo
+.git
+.github
+.gitignore
+
+# Tests
+tests
+
+# Cache y logs locales
+storage/logs
+storage/framework/cache
+storage/framework/sessions
+bootstrap/cachedocker/mysql/

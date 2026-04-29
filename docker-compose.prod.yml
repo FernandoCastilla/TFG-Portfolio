@@ -1,0 +1,33 @@
+# =============================================================================
+# UGR Portfolio — Docker Compose de producción
+# Para uso en devceprud.ugr.es
+# =============================================================================
+services:
+  ugr-portfolio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ugr-portfolio
+    restart: unless-stopped
+    ports:
+      - "8080:8080"    # Alberto puede cambiar el puerto externo si lo necesita
+    environment:
+      APP_NAME: "UGR Portfolio"
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: https://devceprud.ugr.es/portfolio
+      # APP_KEY: se genera automáticamente en el entrypoint si no se define aquí
+      DB_CONNECTION: sqlite
+      DB_DATABASE: /var/www/html/database/database.sqlite
+      SESSION_DRIVER: file
+      CACHE_STORE: file
+      OPENPROJECT_URL: https://proyectostic.ugr.es
+      OPENPROJECT_TOKEN: ${OPENPROJECT_TOKEN}  # pasar como variable de entorno al desplegar
+    volumes:
+      # Persistir los JSON sincronizados y la BD SQLite fuera del contenedor
+      - ugr_portfolio_storage:/var/www/html/storage/app
+      - ugr_portfolio_db:/var/www/html/database
+
+volumes:
+  ugr_portfolio_storage:
+  ugr_portfolio_db:
