@@ -44,7 +44,7 @@ UGR Portfolio consume la API REST de la instancia institucional de OpenProject (
 ### 1. Clonar el repositorio
 
 ```bash
-git clone ENLACE A GIT A INCLUIR
+git clone https://github.com/FernandoCastilla/TFG-Portfolio
 cd ugr-portfolio
 ```
 
