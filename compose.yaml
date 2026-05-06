@@ -1,19 +1,19 @@
 services:
     laravel.test:
-        network_mode: 'host'
         build:
             context: './vendor/laravel/sail/runtimes/8.5'
             dockerfile: Dockerfile
             args:
                 WWWGROUP: '${WWWGROUP}'
         image: 'sail-8.5/app'
-        extra_hosts:
-            - 'host.docker.internal:host-gateway'
+        # network_mode: host es necesario para la VPN de la UGR
+        # Sin esto el contenedor no accede a proyectostic.ugr.es
+        network_mode: host
         environment:
             WWWUSER: '${WWWUSER}'
             LARAVEL_SAIL: 1
             XDEBUG_MODE: '${SAIL_XDEBUG_MODE:-off}'
-            XDEBUG_CONFIG: '${SAIL_XDEBUG_CONFIG:-client_host=host.docker.internal}'
+            XDEBUG_CONFIG: '${SAIL_XDEBUG_CONFIG:-client_host=127.0.0.1}'
             IGNITION_LOCAL_SITES_PATH: '${PWD}'
         volumes:
             - '.:/var/www/html'
@@ -22,7 +22,6 @@ services:
             - redis
             - meilisearch
             - mailpit
-            - selenium
     mysql:
         image: 'mysql:8.4'
         ports:
@@ -89,14 +88,10 @@ services:
             - '${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025'
         networks:
             - sail
-    selenium:
-        image: selenium/standalone-chromium
         extra_hosts:
             - 'host.docker.internal:host-gateway'
         volumes:
             - '/dev/shm:/dev/shm'
-        networks:
-            - sail
 networks:
     sail:
         driver: bridge

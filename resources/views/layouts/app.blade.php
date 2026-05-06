@@ -28,14 +28,117 @@
             </div>
         </div>
 
-        <div class="px-4 py-4 border-b border-teal-800 dark:border-gray-800 bg-teal-900 dark:bg-gray-900">
-            <form action="{{ route('buscar') }}" method="GET" class="relative">
-                <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-teal-400">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+        <div class="px-4 py-4 border-b border-teal-800 dark:border-gray-800 bg-teal-900 dark:bg-gray-900"
+             x-data="{
+                query: '{{ request('q') }}',
+                resultados: { proyectos: [], tareas: [] },
+                abierto: false,
+                cargando: false,
+                timer: null,
+                buscar() {
+                    clearTimeout(this.timer);
+                    if (this.query.length < 2) {
+                        this.resultados = { proyectos: [], tareas: [] };
+                        this.abierto = false;
+                        return;
+                    }
+                    this.cargando = true;
+                    this.timer = setTimeout(() => {
+                        fetch('/api/buscar?q=' + encodeURIComponent(this.query))
+                            .then(r => r.json())
+                            .then(data => {
+                                this.resultados = data;
+                                this.abierto = data.proyectos.length > 0 || data.tareas.length > 0;
+                                this.cargando = false;
+                            });
+                    }, 280);
+                },
+                irA(url) {
+                    this.abierto = false;
+                    window.location.href = url;
+                },
+                verTodos() {
+                    window.location.href = '/buscar?q=' + encodeURIComponent(this.query);
+                }
+             }"
+             @keydown.escape="abierto = false"
+             @click.outside="abierto = false">
+
+            <div class="relative">
+                <div class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none"
+                     :class="cargando ? 'text-teal-300 animate-spin' : 'text-teal-400'">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path x-show="!cargando" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                        <path x-show="cargando" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M4 12a8 8 0 018-8v8H4z"/>
+                    </svg>
                 </div>
-                <input type="text" name="q" value="{{ request('q') }}" placeholder="Buscar proyecto o tarea..."
-                       class="w-full bg-teal-800 dark:bg-gray-800 text-sm text-white dark:text-gray-200 border border-teal-700 dark:border-gray-700 rounded-lg pl-9 pr-3 py-2 focus:ring-teal-500 focus:border-teal-500 placeholder-teal-400 dark:placeholder-gray-500 transition-colors">
-            </form>
+
+                {{-- Input con búsqueda en tiempo real --}}
+                <input type="text"
+                       x-model="query"
+                       @input="buscar()"
+                       @keydown.enter.prevent="verTodos()"
+                       @focus="if(query.length >= 2) abierto = true"
+                       placeholder="Buscar proyecto o tarea..."
+                       class="w-full bg-teal-800 dark:bg-gray-800 text-sm text-white dark:text-gray-200
+                              border border-teal-700 dark:border-gray-700 rounded-lg pl-9 pr-3 py-2
+                              focus:ring-teal-500 focus:border-teal-500 placeholder-teal-400
+                              dark:placeholder-gray-500 transition-colors">
+
+                {{-- Dropdown de resultados en tiempo real --}}
+                <div x-show="abierto" x-transition
+                     class="absolute top-full left-0 right-0 mt-1 bg-gray-900 dark:bg-gray-800
+                            border border-teal-700 dark:border-gray-600 rounded-xl shadow-2xl z-50
+                            overflow-hidden max-h-80 overflow-y-auto">
+
+                    {{-- Proyectos --}}
+                    <template x-if="resultados.proyectos.length > 0">
+                        <div>
+                            <div class="px-3 py-1.5 text-xs font-bold text-teal-400 uppercase tracking-wider bg-teal-900/50">
+                                Proyectos
+                            </div>
+                            <template x-for="p in resultados.proyectos" :key="p.id">
+                                <button @click="irA(p.url)"
+                                        class="w-full text-left flex items-center gap-2 px-3 py-2
+                                               hover:bg-teal-800 dark:hover:bg-gray-700 transition">
+                                    <span class="text-xs text-teal-400 font-mono shrink-0" x-text="'#' + p.id"></span>
+                                    <span class="text-sm text-white truncate" x-text="p.name"></span>
+                                </button>
+                            </template>
+                        </div>
+                    </template>
+
+                    {{-- Tareas --}}
+                    <template x-if="resultados.tareas.length > 0">
+                        <div>
+                            <div class="px-3 py-1.5 text-xs font-bold text-amber-400 uppercase tracking-wider bg-teal-900/50">
+                                Tareas
+                            </div>
+                            <template x-for="t in resultados.tareas" :key="t.id">
+                                <button @click="irA(t.url)"
+                                        class="w-full text-left flex items-start gap-2 px-3 py-2
+                                               hover:bg-teal-800 dark:hover:bg-gray-700 transition">
+                                    <span class="text-xs text-gray-400 font-mono shrink-0 mt-0.5" x-text="'#' + t.id"></span>
+                                    <div class="min-w-0">
+                                        <div class="text-sm text-white truncate" x-text="t.subject"></div>
+                                        <div class="text-xs text-gray-400 truncate" x-text="t.estado"></div>
+                                    </div>
+                                </button>
+                            </template>
+                        </div>
+                    </template>
+
+                    {{-- Ver todos --}}
+                    <button @click="verTodos()"
+                            class="w-full text-center text-xs text-teal-400 hover:text-teal-300
+                                   py-2.5 border-t border-teal-800 dark:border-gray-700
+                                   hover:bg-teal-900/50 transition font-semibold">
+                        Ver todos los resultados →
+                    </button>
+                </div>
+            </div>
         </div>
 
         <nav class="flex-1 px-4 py-6 space-y-2 overflow-y-auto bg-teal-900 dark:bg-gray-900">

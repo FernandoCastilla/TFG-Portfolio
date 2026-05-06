@@ -4,355 +4,110 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\File;
+use App\Services\WorkPackageTreeBuilder;
+use App\Services\FamilyPaginator;
+use App\Services\KpiCalculator;
 use Barryvdh\DomPDF\Facade\Pdf;
 
 class ProjectController extends Controller
 {
+    // ─────────────────────────────────────────────────────────────────────────
+    // LISTADO DE PROYECTOS
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function index(Request $request)
     {
-        // 1. Recogemos todos los filtros del usuario
-        $search = $request->input('search');
-        $statusFilter = $request->input('status'); // 'active' o 'inactive'
-        $visibilityFilter = $request->input('visibility'); // 'public' o 'private'
-
-        $rutaArchivo = storage_path('app/proyectos_ugr.json');
+        $rutaProyectos = storage_path('app/proyectos_ugr.json');
         $proyectos = [];
 
-        if (\Illuminate\Support\Facades\File::exists($rutaArchivo)) {
-            $jsonCrudo = \Illuminate\Support\Facades\File::get($rutaArchivo);
-            $datos = json_decode($jsonCrudo, true);
-            $proyectos = $datos['_embedded']['elements'] ?? [];
+        if (File::exists($rutaProyectos)) {
+            $data = json_decode(File::get($rutaProyectos), true);
+            $proyectos = $data['_embedded']['elements'] ?? [];
         }
 
-        // 2. Aplicamos TODOS los filtros a la vez
-        $proyectos = array_filter($proyectos, function($proyecto) use ($search, $statusFilter, $visibilityFilter) {
-            
-            // Filtro 1: Texto (Nombre)
-            $coincideTexto = true;
-            if ($search) {
-                $coincideTexto = stripos($proyecto['name'], $search) !== false;
-            }
+        $busqueda  = $request->query('busqueda', '');
+        $soloActivos = $request->query('activos', '');
 
-            // Filtro 2: Estado (Activo/Inactivo)
-            $coincideEstado = true;
-            if ($statusFilter === 'active') {
-                $coincideEstado = $proyecto['active'] === true;
-            } elseif ($statusFilter === 'inactive') {
-                $coincideEstado = $proyecto['active'] === false;
-            }
+        if (!empty($busqueda)) {
+            $proyectos = array_filter($proyectos, fn($p) =>
+                stripos($p['name'] ?? '', $busqueda) !== false
+            );
+        }
 
-            // Filtro 3: Visibilidad (Público/Privado)
-            $coincideVisibilidad = true;
-            if ($visibilityFilter === 'public') {
-                $coincideVisibilidad = $proyecto['public'] === true;
-            } elseif ($visibilityFilter === 'private') {
-                $coincideVisibilidad = $proyecto['public'] === false;
-            }
+        if ($soloActivos === '1') {
+            $proyectos = array_filter($proyectos, fn($p) => $p['active'] ?? false);
+        }
 
-            // El proyecto solo sobrevive si cumple TODOS los filtros que el usuario haya puesto
-            return $coincideTexto && $coincideEstado && $coincideVisibilidad;
-        });
-
-        // 3. Enviamos los proyectos filtrados y las variables a la vista (para que los selects no se borren)
-        return view('proyectos.index', compact('proyectos', 'search', 'statusFilter', 'visibilityFilter'));
+        return view('proyectos.index', compact('proyectos', 'busqueda', 'soloActivos'));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DETALLE DE PROYECTO
+    // ─────────────────────────────────────────────────────────────────────────
 
     public function show($id)
     {
-        $rutaArchivo = storage_path('app/proyectos_ugr.json');
-        
-        if (\Illuminate\Support\Facades\File::exists($rutaArchivo)) {
-            $jsonCrudo = \Illuminate\Support\Facades\File::get($rutaArchivo);
-            $datos = json_decode($jsonCrudo, true);
-            $proyectos = $datos['_embedded']['elements'] ?? [];
+        $proyecto = $this->encontrarProyecto((int) $id);
+        abort_unless($proyecto, 404, 'Proyecto no encontrado');
 
-            // Usamos las "Collections" de Laravel para buscar el proyecto con ese ID
-            $proyecto = collect($proyectos)->firstWhere('id', (int)$id);
-
-            // Si lo encontramos, cargamos la vista de detalles
-            if ($proyecto) {
-                return view('proyectos.show', compact('proyecto'));
-            }
-        }
-
-        // Si no existe el ID o el archivo, devolvemos un error 404
-        abort(404, 'Proyecto no encontrado');
+        return view('proyectos.show', compact('proyecto'));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WORK PACKAGES DE UN PROYECTO
+    // ─────────────────────────────────────────────────────────────────────────
 
     public function tareas(Request $request, $id)
     {
-        $rutaProyectos = storage_path('app/proyectos_ugr.json');
-        $proyecto = null;
-        if (\Illuminate\Support\Facades\File::exists($rutaProyectos)) {
-            $proyectosData = json_decode(\Illuminate\Support\Facades\File::get($rutaProyectos), true);
-            $proyecto = collect($proyectosData['_embedded']['elements'] ?? [])->firstWhere('id', (int)$id);
-        }
+        $proyecto = $this->encontrarProyecto((int) $id);
+        abort_unless($proyecto, 404, 'Proyecto no encontrado');
 
-        if (!$proyecto) {
-            abort(404, 'Proyecto no encontrado');
-        }
-
-        $rutaTareas = storage_path('app/tareas_ugr.json');
-        $tareas = [];
-        $graficaLabels = [];
-        $graficaDatos = [];
-        
-        // Variables para los filtros
-        $tipos = collect();
-        $estados = collect();
-        $asignados = collect();
-        
-        $selectedSort = $request->query('sort');
-
-        $selectedTipo = $request->query('tipo');
-        $selectedEstado = $request->query('estado');
-        $selectedAsignado = $request->query('asignado');
-        $selectedSearch = $request->query('search');
+        // Filtros activos
+        $selectedSort      = $request->query('sort');
+        $selectedTipo      = $request->query('tipo');
+        $selectedEstado    = $request->query('estado');
+        $selectedAsignado  = $request->query('asignado');
+        $selectedSearch    = $request->query('search');
         $selectedPrioridad = $request->query('prioridad');
-        $selectedEntidad = $request->query('entidad');
+        $selectedEntidad   = $request->query('entidad');
+        $selectedYear      = $request->query('year');
+        $selectedMonth     = $request->query('month');
 
-        
-        // Variables para el filtro de fechas
-        $selectedYear = $request->query('year');
-        $selectedMonth = $request->query('month');
+        // 1. Cargar todas las tareas del proyecto
+        $tareas = $this->cargarTareasDeProyecto((int) $id);
 
-        if (\Illuminate\Support\Facades\File::exists($rutaTareas)) {
-            $tareasData = json_decode(\Illuminate\Support\Facades\File::get($rutaTareas), true);
-            $todasLasTareas = $tareasData['_embedded']['elements'] ?? [];
+        // 2. Extraer valores únicos para los desplegables (antes de filtrar)
+        $tipos      = collect($tareas)->map(fn($t) => $t['_links']['type']['title']     ?? 'Desconocido')->unique()->sort()->values();
+        $estados    = collect($tareas)->map(fn($t) => $t['_links']['status']['title']   ?? 'Desconocido')->unique()->sort()->values();
+        $asignados  = collect($tareas)->map(fn($t) => $t['_links']['assignee']['title'] ?? 'Sin asignar')->unique()->sort()->values();
+        $prioridades = collect($tareas)->map(fn($t) => $t['_links']['priority']['title'] ?? 'Normal')->unique()->sort()->values();
+        $entidades  = collect($tareas)->map(fn($t) => $t['customField3'] ?? null)->filter()->unique()->sort()->values();
 
-            // Filtramos las tareas de este proyecto
-            $tareas = array_filter($todasLasTareas, function($tarea) use ($id) {
-                $enlaceProyecto = $tarea['_links']['project']['href'] ?? '';
-                return str_ends_with($enlaceProyecto, '/' . $id);
-            });
+        // 3. Aplicar filtros
+        $tareas = $this->filtrar($tareas, $selectedTipo, $selectedEstado, $selectedAsignado,
+                                 $selectedYear, $selectedMonth, $selectedSearch,
+                                 $selectedPrioridad, $selectedEntidad);
 
-            // Extraemos todos los valores ÚNICOS para los desplegables
-            $tipos = collect($tareas)->map(fn($t) => $t['_links']['type']['title'] ?? 'Desconocido')->unique()->sort()->values();
-            $estados = collect($tareas)->map(fn($t) => $t['_links']['status']['title'] ?? 'Desconocido')->unique()->sort()->values();
-            $asignados = collect($tareas)->map(fn($t) => $t['_links']['assignee']['title'] ?? 'Sin asignar')->unique()->sort()->values();
-            $prioridades = collect($tareas)->map(fn($t) => $t['_links']['priority']['title'] ?? 'Normal')->unique()->sort()->values();
-            $entidades = collect($tareas)->map(fn($t) => $t['customField3'] ?? null)->filter()->unique()->sort()->values();
+        // 4. Aplicar ordenación
+        $tareas = $this->ordenar($tareas, $selectedSort);
 
-            // Aplicamos los filtros si el usuario ha seleccionado alguno
-            if ($selectedTipo || $selectedEstado || $selectedAsignado || $selectedYear || $selectedMonth || $selectedSearch || $selectedPrioridad || $selectedEntidad) {
-                $tareas = array_filter($tareas, function($tarea) use ($selectedTipo, $selectedEstado, $selectedAsignado, $selectedYear, $selectedMonth, $selectedSearch, $selectedPrioridad, $selectedEntidad) {
-                    
-                    // Comprobaciones de los filtros
-                    $matchTipo = !$selectedTipo || ($tarea['_links']['type']['title'] ?? 'Desconocido') === $selectedTipo;
-                    $matchEstado = !$selectedEstado || ($tarea['_links']['status']['title'] ?? 'Desconocido') === $selectedEstado;
-                    $matchAsignado = !$selectedAsignado || ($tarea['_links']['assignee']['title'] ?? 'Sin asignar') === $selectedAsignado;
-                    $matchPrioridad = !$selectedPrioridad || ($tarea['_links']['priority']['title'] ?? 'Normal') === $selectedPrioridad;
-                    $matchEntidad = !$selectedEntidad || ($tarea['customField3'] ?? '') === $selectedEntidad;
+        // 5. Calcular datos para la gráfica (sobre el total filtrado, no la página)
+        [$graficaLabels, $graficaDatos] = $this->calcularGrafica($tareas);
 
-                    // Busqueda de texto en el nombre de la tarea
-                    $matchSearch = true;
-                    if (!empty($selectedSearch)) {
-                        $subject = $tarea['subject'] ?? '';
-                        // stripos devuelve false si no encuentra la palabra
-                        if (stripos($subject, $selectedSearch) === false) {
-                            $matchSearch = false;
-                        }
-                    }
-                    
-                    
-                    // Comprobación de la lógica de fechas
-                    $matchFecha = true;
-                    if ($selectedYear) {
-                        $fechaString = $tarea['startDate'] ?? $tarea['createdAt'] ?? null;
-                        
-                        if (!$fechaString) {
-                            $matchFecha = false; // Si no tiene fecha, no la mostramos
-                        } else {
-                            $taskYear = date('Y', strtotime($fechaString));
-                            $taskMonth = date('m', strtotime($fechaString));
-                            
-                            if ($selectedYear != $taskYear) {
-                                $matchFecha = false;
-                            } elseif ($selectedMonth && $selectedMonth != $taskMonth) {
-                                $matchFecha = false;
-                            }
-                        }
-                    }
-                    
-                    // Solo mantenemos la tarea si cumple TODOS los filtros activos
-                    return $matchTipo && $matchEstado && $matchAsignado && $matchFecha && $matchSearch && $matchPrioridad && $matchEntidad;
-                });
-            }
+        // 6. Construir árbol jerárquico padre-hijo
+        $tareas = (new WorkPackageTreeBuilder())->build($tareas);
 
-            // Lógica de ordenación
-            if (!empty($selectedSort)) {
-                $tareasCollection = collect($tareas);
+        // 7. Paginar por familias completas
+        $resultado = (new FamilyPaginator(20))->paginate(
+            $tareas,
+            (int) $request->query('page', 1),
+            $request->url(),
+            $request->except('page')
+        );
 
-                switch ($selectedSort) {
-                    case 'date_desc': // Más recientes primero
-                        $tareas = $tareasCollection->sortByDesc(function($t) {
-                            return $t['startDate'] ?? '0000-00-00';
-                        })->values()->all();
-                        break;
-                    case 'date_asc': // Más antiguas primero
-                        $tareas = $tareasCollection->sortBy(function($t) {
-                            return $t['startDate'] ?? '9999-12-31';
-                        })->values()->all();
-                        break;
-                    case 'progress_desc': // 100% a 0%
-                        $tareas = $tareasCollection->sortByDesc(function($t) {
-                            return $t['percentageDone'] ?? 0;
-                        })->values()->all();
-                        break;
-                    case 'progress_asc': // 0% a 100%
-                        $tareas = $tareasCollection->sortBy(function($t) {
-                            return $t['percentageDone'] ?? 0;
-                        })->values()->all();
-                        break;
-                    case 'name_asc': // A - Z
-                        $tareas = $tareasCollection->sortBy(function($t) {
-                            return strtolower($t['subject'] ?? '');
-                        })->values()->all();
-                        break;
-                    case 'name_desc': // Z - A
-                        $tareas = $tareasCollection->sortByDesc(function($t) {
-                            return strtolower($t['subject'] ?? '');
-                        })->values()->all();
-                        break;
-                }
-            }
+        $tareas               = $resultado['paginator'];
+        $totalTareasFiltradas = $resultado['total'];
 
-            // Gráfica — calculada sobre el total filtrado, NO sobre la página actual
-            $conteoEstados = [];
-            foreach ($tareas as $tarea) {
-                $estado = $tarea['_links']['status']['title'] ?? 'Desconocido';
-                if (!isset($conteoEstados[$estado])) {
-                    $conteoEstados[$estado] = 0;
-                }
-                $conteoEstados[$estado]++;
-            }
-
-            $graficaLabels = array_keys($conteoEstados);
-            $graficaDatos  = array_values($conteoEstados);
-
-            // ÁRBOL DE JERARQUÍA
-            // Se construye aquí en el controlador para tener acceso al conjunto
-            // completo de tareas (con todas sus relaciones padre-hijo) antes de paginar.
-            // Si se hiciera en la vista sobre el paginator, los hijos de una tarea padre
-            // que estén en otra página quedarían huérfanos visualmente.
-            $tareasPorId   = [];
-            $hijosPorPadre = [];
-            $idsPadres     = [];
-
-            foreach ($tareas as $t) {
-                $hrefPadre = $t['_links']['parent']['href'] ?? null;
-                if ($hrefPadre) $idsPadres[] = (int) basename($hrefPadre);
-            }
-
-            foreach ($tareas as $t) {
-                $hrefPadre       = $t['_links']['parent']['href'] ?? null;
-                $t['padre_id']   = $hrefPadre ? (int) basename($hrefPadre) : null;
-                $t['tiene_hijos'] = in_array($t['id'], $idsPadres);
-                $tareasPorId[$t['id']] = $t;
-                if ($t['padre_id']) $hijosPorPadre[$t['padre_id']][] = $t['id'];
-            }
-
-            $tareasOrdenadas = [];
-            $procesados      = [];
-
-            $buildTree = function($idTarea, $nivel = 0) use (
-                &$buildTree, &$tareasOrdenadas, &$procesados, &$tareasPorId, &$hijosPorPadre
-            ) {
-                if (in_array($idTarea, $procesados)) return;
-                $procesados[] = $idTarea;
-                $tarea = $tareasPorId[$idTarea];
-                $tarea['nivel'] = $nivel;
-                $tareasOrdenadas[] = $tarea;
-                if (isset($hijosPorPadre[$idTarea])) {
-                    foreach ($hijosPorPadre[$idTarea] as $idHijo) {
-                        if (isset($tareasPorId[$idHijo])) $buildTree($idHijo, $nivel + 1);
-                    }
-                }
-            };
-
-            foreach ($tareasPorId as $id => $t) {
-                if (!$t['padre_id'] || !isset($tareasPorId[$t['padre_id']])) {
-                    $buildTree($id, 0);
-                }
-            }
-
-            $tareas = $tareasOrdenadas;
-
-            // PAGINACIÓN POR FAMILIAS COMPLETAS
-            // No cortamos en medio de un grupo padre-hijos. Acumulamos tareas raíz
-            // (nivel === 0) hasta superar el límite, pero solo cortamos al llegar
-            // a la siguiente tarea raíz. Así una familia siempre aparece completa
-            // en la misma página.
-            $perPage     = 20;
-            $currentPage = (int) $request->query('page', 1);
-
-            // Agrupamos el array plano en "familias": cada vez que encontramos
-            // una tarea de nivel 0 empezamos un nuevo grupo.
-            $familias      = [];
-            $familiaActual = [];
-
-            foreach ($tareas as $t) {
-                if (($t['nivel'] ?? 0) === 0 && !empty($familiaActual)) {
-                    $familias[] = $familiaActual;
-                    $familiaActual = [];
-                }
-                $familiaActual[] = $t;
-            }
-            if (!empty($familiaActual)) {
-                $familias[] = $familiaActual;
-            }
-
-            // Distribuimos familias en páginas: añadimos familias completas
-            // hasta superar $perPage, luego empezamos una nueva página.
-            $paginas      = [];
-            $paginaActual = [];
-            $countActual  = 0;
-
-            foreach ($familias as $familia) {
-                // Si la página actual ya tiene tareas y añadir esta familia la haría
-                // superar el límite, abrimos una página nueva.
-                if ($countActual > 0 && $countActual + count($familia) > $perPage) {
-                    $paginas[]    = $paginaActual;
-                    $paginaActual = [];
-                    $countActual  = 0;
-                }
-                foreach ($familia as $t) {
-                    $paginaActual[] = $t;
-                    $countActual++;
-                }
-            }
-            if (!empty($paginaActual)) {
-                $paginas[] = $paginaActual;
-            }
-
-            $totalPaginas = count($paginas);
-            $currentPage  = max(1, min($currentPage, $totalPaginas ?: 1));
-            $tareasPagina = $paginas[$currentPage - 1] ?? [];
-
-            // El total que mostramos en "X de N tareas" es el total filtrado real.
-            $tareas = new \Illuminate\Pagination\LengthAwarePaginator(
-                $tareasPagina,
-                count($tareas),
-                $perPage,          // referencial — el tamaño real varía por familias
-                $currentPage,
-                ['path' => $request->url(), 'query' => $request->except('page')]
-            );
-
-            // Sobreescribimos lastPage con el número real de páginas calculado,
-            // ya que LengthAwarePaginator lo calcularía mal con familias variables.
-            $tareas = new \Illuminate\Pagination\LengthAwarePaginator(
-                $tareasPagina,
-                $totalPaginas * $perPage, // trick para que lastPage() == $totalPaginas
-                $perPage,
-                $currentPage,
-                ['path' => $request->url(), 'query' => $request->except('page')]
-            );
-
-            // Guardamos el total real aparte para mostrarlo en la vista
-            $totalTareasFiltradas = array_sum(array_map('count', $paginas));
-        }
-
-        // Enviamos todo a la vista
         return view('proyectos.tareas', compact(
             'proyecto', 'tareas', 'graficaLabels', 'graficaDatos',
             'tipos', 'estados', 'asignados', 'prioridades', 'entidades',
@@ -362,100 +117,47 @@ class ProjectController extends Controller
         ));
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // EXPORTAR PDF
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function exportarPdf($id)
     {
-        $rutaProyectos = storage_path('app/proyectos_ugr.json');
-        $proyecto = null;
-        if (\Illuminate\Support\Facades\File::exists($rutaProyectos)) {
-            $proyectosData = json_decode(\Illuminate\Support\Facades\File::get($rutaProyectos), true);
-            $proyecto = collect($proyectosData['_embedded']['elements'] ?? [])->firstWhere('id', (int)$id);
-        }
+        $proyecto = $this->encontrarProyecto((int) $id);
+        abort_unless($proyecto, 404, 'Proyecto no encontrado');
 
-        if (!$proyecto) {
-            abort(404, 'Proyecto no encontrado');
-        }
+        $tareas = $this->cargarTareasDeProyecto((int) $id);
+        $kpis   = KpiCalculator::calcular($tareas);
 
-        $rutaTareas = storage_path('app/tareas_ugr.json');
-        $tareas = [];
-        if (\Illuminate\Support\Facades\File::exists($rutaTareas)) {
-            $tareasData = json_decode(\Illuminate\Support\Facades\File::get($rutaTareas), true);
-            $todasLasTareas = $tareasData['_embedded']['elements'] ?? [];
+        $pdf = Pdf::loadView('proyectos.pdf', compact('proyecto', 'tareas', 'kpis'))
+                  ->setPaper('a4', 'landscape');
 
-            $tareas = array_filter($todasLasTareas, function($tarea) use ($id) {
-                $enlaceProyecto = $tarea['_links']['project']['href'] ?? '';
-                return str_ends_with($enlaceProyecto, '/' . $id);
-            });
-        }
-
-        // Cargamos una vista especial para el PDF y le pasamos los datos
-        $pdf = Pdf::loadView('proyectos.pdf', compact('proyecto', 'tareas'));
-        
-        // Forzamos la descarga del archivo con un nombre dinámico
         return $pdf->download('informe_UGR_proyecto_' . $proyecto['id'] . '.pdf');
     }
 
-    /**
-     * Exporta todas las tareas de un proyecto a un fichero CSV descargable.
-     *
-     * Incluye los mismos campos que la vista de tareas, más los campos
-     * customField de la instancia UGR (entidad solicitante, contacto, email),
-     * para que el Vicerrectorado pueda cruzar los datos con otras fuentes.
-     *
-     * El fichero usa codificación UTF-8 con BOM para que Excel lo abra
-     * correctamente sin problemas de acentos y caracteres especiales.
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    // EXPORTAR CSV
+    // ─────────────────────────────────────────────────────────────────────────
+
     public function exportarCsv($id)
     {
-        $rutaProyectos = storage_path('app/proyectos_ugr.json');
-        $proyecto = null;
-        if (\Illuminate\Support\Facades\File::exists($rutaProyectos)) {
-            $proyectosData = json_decode(\Illuminate\Support\Facades\File::get($rutaProyectos), true);
-            $proyecto = collect($proyectosData['_embedded']['elements'] ?? [])->firstWhere('id', (int) $id);
-        }
-
+        $proyecto = $this->encontrarProyecto((int) $id);
         abort_unless($proyecto, 404, 'Proyecto no encontrado');
 
-        $rutaTareas = storage_path('app/tareas_ugr.json');
-        $tareas = [];
-        if (\Illuminate\Support\Facades\File::exists($rutaTareas)) {
-            $tareasData     = json_decode(\Illuminate\Support\Facades\File::get($rutaTareas), true);
-            $todasLasTareas = $tareasData['_embedded']['elements'] ?? [];
+        $tareas        = $this->cargarTareasDeProyecto((int) $id);
+        $nombreFichero = 'ugr_portfolio_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $proyecto['name'] ?? $id)
+                       . '_' . date('Ymd') . '.csv';
 
-            $tareas = array_values(array_filter($todasLasTareas, function ($tarea) use ($id) {
-                return str_ends_with($tarea['_links']['project']['href'] ?? '', '/' . $id);
-            }));
-        }
-
-        // Nombre del fichero: sin espacios ni caracteres especiales
-        $nombreProyecto = preg_replace('/[^a-zA-Z0-9_-]/', '_', $proyecto['name'] ?? $id);
-        $nombreFichero  = 'ugr_portfolio_' . $nombreProyecto . '_' . date('Ymd') . '.csv';
-
-        // Generamos el CSV en memoria con un stream temporal
         $handle = fopen('php://temp', 'r+');
+        fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF)); // BOM UTF-8 para Excel
 
-        // BOM UTF-8: necesario para que Excel abra el fichero con acentos correctamente
-        fprintf($handle, chr(0xEF) . chr(0xBB) . chr(0xBF));
-
-        // Cabecera de columnas
         fputcsv($handle, [
-            'ID',
-            'Asunto',
-            'Tipo',
-            'Estado',
-            'Progreso (%)',
-            'Asignado a',
-            'T. Estimado',
-            'T. Dedicado',
-            'Entidad Solicitante',
-            'Persona Contacto',
-            'Email Contacto',
-            'Fecha Inicio',
-            'Fecha Fin',
-            'Prioridad',
-            'Proyecto',
-        ], ';'); // separador ; para compatibilidad con Excel en español
+            'ID', 'Asunto', 'Tipo', 'Estado', 'Progreso (%)',
+            'Asignado a', 'T. Estimado', 'T. Dedicado',
+            'Entidad Solicitante', 'Persona Contacto', 'Email Contacto',
+            'Fecha Inicio', 'Fecha Fin', 'Prioridad', 'Proyecto',
+        ], ';');
 
-        // Filas de datos
         foreach ($tareas as $tarea) {
             fputcsv($handle, [
                 $tarea['id'],
@@ -466,9 +168,9 @@ class ProjectController extends Controller
                 $tarea['_links']['assignee']['title'] ?? '',
                 self::parsearDuracion($tarea['estimatedTime'] ?? null) ?? '',
                 self::parsearDuracion($tarea['spentTime']     ?? null) ?? '',
-                $tarea['customField3'] ?? '',   // Entidad solicitante
-                $tarea['customField4'] ?? '',   // Persona de contacto
-                $tarea['customField5'] ?? '',   // Email de contacto
+                $tarea['customField3'] ?? '',
+                $tarea['customField4'] ?? '',
+                $tarea['customField5'] ?? '',
                 $tarea['startDate']    ?? '',
                 $tarea['dueDate']      ?? '',
                 $tarea['_links']['priority']['title'] ?? '',
@@ -483,15 +185,120 @@ class ProjectController extends Controller
         return response($contenido, 200, [
             'Content-Type'        => 'text/csv; charset=UTF-8',
             'Content-Disposition' => 'attachment; filename="' . $nombreFichero . '"',
-            'Pragma'              => 'no-cache',
-            'Expires'             => '0',
         ]);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // HELPERS PRIVADOS
+    // ─────────────────────────────────────────────────────────────────────────
+
     /**
-     * Convierte una duración ISO 8601 (ej. "P3DT21H30M", "PT10H") en texto
-     * legible en horas y minutos (ej. "93h 30m", "10h").
-     * Devuelve null si el valor es nulo, vacío o cero (PT0S).
+     * Encuentra un proyecto por ID en el JSON local.
+     */
+    private function encontrarProyecto(int $id): ?array
+    {
+        $ruta = storage_path('app/proyectos_ugr.json');
+        if (!File::exists($ruta)) return null;
+
+        $data = json_decode(File::get($ruta), true);
+        return collect($data['_embedded']['elements'] ?? [])->firstWhere('id', $id);
+    }
+
+    /**
+     * Devuelve todas las tareas de un proyecto concreto desde el JSON local.
+     */
+    private function cargarTareasDeProyecto(int $id): array
+    {
+        $ruta = storage_path('app/tareas_ugr.json');
+        if (!File::exists($ruta)) return [];
+
+        $data = json_decode(File::get($ruta), true);
+        $todas = $data['_embedded']['elements'] ?? [];
+
+        return array_values(array_filter($todas, fn($t) =>
+            str_ends_with($t['_links']['project']['href'] ?? '', '/' . $id)
+        ));
+    }
+
+    /**
+     * Aplica todos los filtros activos sobre un array de tareas.
+     */
+    private function filtrar(
+        array $tareas,
+        ?string $tipo, ?string $estado, ?string $asignado,
+        ?string $year, ?string $month, ?string $search,
+        ?string $prioridad, ?string $entidad
+    ): array {
+        if (!$tipo && !$estado && !$asignado && !$year && !$month
+            && !$search && !$prioridad && !$entidad) {
+            return $tareas;
+        }
+
+        return array_values(array_filter($tareas, function ($t) use (
+            $tipo, $estado, $asignado, $year, $month, $search, $prioridad, $entidad
+        ) {
+            if ($tipo      && ($t['_links']['type']['title']     ?? '') !== $tipo)      return false;
+            if ($estado    && ($t['_links']['status']['title']   ?? '') !== $estado)    return false;
+            if ($asignado  && ($t['_links']['assignee']['title'] ?? '') !== $asignado)  return false;
+            if ($prioridad && ($t['_links']['priority']['title'] ?? '') !== $prioridad) return false;
+            if ($entidad   && ($t['customField3']                ?? '') !== $entidad)   return false;
+
+            if ($search && stripos($t['subject'] ?? '', $search) === false) return false;
+
+            if ($year) {
+                $fecha = $t['startDate'] ?? $t['createdAt'] ?? null;
+                if (!$fecha) return false;
+                if (date('Y', strtotime($fecha)) != $year) return false;
+                if ($month && date('m', strtotime($fecha)) != $month) return false;
+            }
+
+            return true;
+        }));
+    }
+
+    /**
+     * Ordena las tareas según el criterio seleccionado.
+     */
+    private function ordenar(array $tareas, ?string $sort): array
+    {
+        if (!$sort) return $tareas;
+
+        $col = collect($tareas);
+
+        return match($sort) {
+            'date_desc'     => $col->sortByDesc(fn($t) => $t['startDate']      ?? '')->values()->all(),
+            'date_asc'      => $col->sortBy(fn($t)     => $t['startDate']      ?? '')->values()->all(),
+            'progress_desc' => $col->sortByDesc(fn($t) => $t['percentageDone'] ?? 0)->values()->all(),
+            'progress_asc'  => $col->sortBy(fn($t)     => $t['percentageDone'] ?? 0)->values()->all(),
+            'name_asc'      => $col->sortBy(fn($t)     => strtolower($t['subject'] ?? ''))->values()->all(),
+            'name_desc'     => $col->sortByDesc(fn($t) => strtolower($t['subject'] ?? ''))->values()->all(),
+            default         => $tareas,
+        };
+    }
+
+    /**
+     * Calcula los datos para la gráfica de distribución por estado.
+     * Se ejecuta sobre el total filtrado, no sobre la página actual.
+     *
+     * @return array{0: array, 1: array}  [labels, datos]
+     */
+    private function calcularGrafica(array $tareas): array
+    {
+        $conteo = [];
+        foreach ($tareas as $t) {
+            $estado = $t['_links']['status']['title'] ?? 'Desconocido';
+            $conteo[$estado] = ($conteo[$estado] ?? 0) + 1;
+        }
+        return [array_keys($conteo), array_values($conteo)];
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UTILIDAD PÚBLICA — usada también desde las vistas Blade
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Convierte una duración ISO 8601 en texto legible.
+     * Ej: "P3DT21H30M" → "93h 30m", "PT10H" → "10h", "PT0S" → null
      */
     public static function parsearDuracion(?string $iso): ?string
     {

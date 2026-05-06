@@ -51,18 +51,18 @@ Route::middleware('guest')->group(function () {
 //     sincronizaciones no controladas.
 // ─────────────────────────────────────────────────────────────────────────────
 Route::middleware('auth')->group(function () {
-
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
-
-    Route::post('/api/sincronizar', function () {
-        try {
-            Artisan::call('ugr:update');
-            return response()->json(['success' => true, 'message' => 'Sincronización completada con éxito']);
-        } catch (\Exception $e) {
-            return response()->json(['success' => false, 'message' => 'Error: ' . $e->getMessage()], 500);
-        }
-    })->name('api.sync');
 });
+
+// Sincronización pública — los datos del Vicerrectorado son accesibles sin login
+Route::post('/api/sincronizar', function () {
+    try {
+        Artisan::call('ugr:update');
+        return response()->json(['success' => true, 'message' => 'Sincronización completada con éxito']);
+    } catch (\Exception $e) {
+        return response()->json(['success' => false, 'message' => 'Error: ' . $e->getMessage()], 500);
+    }
+})->name('api.sync');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RUTAS PÚBLICAS — los datos son accesibles sin autenticación.
@@ -258,30 +258,100 @@ Route::get('/calendario', function () {
 })->name('calendario');
 
 // Buscador global — búsqueda local sobre JSON, sin consultas a la API
+// Busqueda en tiempo real -- devuelve JSON para el dropdown del aside
+Route::get('/api/buscar', function (Request $request) {
+    $query = strtolower(trim($request->query('q', '')));
+
+    if (strlen($query) < 2) {
+        return response()->json(['proyectos' => [], 'tareas' => []]);
+    }
+
+    $proyectos = [];
+    $tareas    = [];
+
+    $rutaProyectos = storage_path('app/proyectos_ugr.json');
+    if (File::exists($rutaProyectos)) {
+        $todos = json_decode(File::get($rutaProyectos), true)['_embedded']['elements'] ?? [];
+        $filtrados = array_values(array_slice(array_filter($todos, fn($p) =>
+            str_contains(strtolower($p['name'] ?? ''), $query) ||
+            str_contains((string) $p['id'], $query)
+        ), 0, 5));
+        $proyectos = array_map(fn($p) => [
+            'id'   => $p['id'],
+            'name' => $p['name'],
+            'url'  => route('proyectos.tareas', $p['id']),
+        ], $filtrados);
+    }
+
+    $rutaTareas = storage_path('app/tareas_ugr.json');
+    if (File::exists($rutaTareas)) {
+        $todas = json_decode(File::get($rutaTareas), true)['_embedded']['elements'] ?? [];
+        $filtradas = array_values(array_slice(array_filter($todas, fn($t) =>
+            str_contains(strtolower($t['subject'] ?? ''), $query) ||
+            str_contains((string) $t['id'], $query)
+        ), 0, 5));
+        $tareas = array_map(fn($t) => [
+            'id'      => $t['id'],
+            'subject' => $t['subject'],
+            'estado'  => $t['_links']['status']['title'] ?? '',
+            'url'     => route('tareas.show', $t['id']),
+        ], $filtradas);
+    }
+
+    return response()->json(compact('proyectos', 'tareas'));
+})->name('api.buscar');
+
 Route::get('/buscar', function (Request $request) {
-    $query = strtolower($request->query('q', ''));
+    $query           = strtolower($request->query('q', ''));
+    $selectedEntidad = $request->query('entidad', '');
+    $selectedAnio    = $request->query('anio', '');
     $resultadosProyectos = [];
     $resultadosTareas    = [];
+    $entidades           = [];
+    $anios               = [];
+
+    // Cargamos todas las entidades y años para los desplegables independientemente del query
+    $rutaTareas = storage_path('app/tareas_ugr.json');
+    if (File::exists($rutaTareas)) {
+        $todasLasTareas = json_decode(File::get($rutaTareas), true)['_embedded']['elements'] ?? [];
+
+        $entidades = collect($todasLasTareas)
+            ->map(fn($t) => $t['customField3'] ?? null)
+            ->filter()->unique()->sort()->values()->all();
+
+        // Años extraídos de startDate; si no tiene, se usa createdAt como fallback
+        $anios = collect($todasLasTareas)
+            ->map(function ($t) {
+                $fecha = $t['startDate'] ?? $t['createdAt'] ?? null;
+                return $fecha ? substr($fecha, 0, 4) : null;
+            })
+            ->filter()->unique()->sort()->values()->all();
+
+        if (!empty($query) || !empty($selectedEntidad) || !empty($selectedAnio)) {
+            $resultadosTareas = array_values(array_filter($todasLasTareas, function ($t) use ($query, $selectedEntidad, $selectedAnio) {
+                $matchTexto   = empty($query) ||
+                    str_contains(strtolower($t['subject'] ?? ''), $query) ||
+                    str_contains((string) $t['id'], $query);
+                $matchEntidad = empty($selectedEntidad) ||
+                    ($t['customField3'] ?? '') === $selectedEntidad;
+                $fechaTarea   = $t['startDate'] ?? $t['createdAt'] ?? '';
+                $matchAnio    = empty($selectedAnio) ||
+                    str_starts_with($fechaTarea, $selectedAnio);
+                return $matchTexto && $matchEntidad && $matchAnio;
+            }));
+        }
+    }
 
     if (!empty($query)) {
         $rutaProyectos = storage_path('app/proyectos_ugr.json');
         if (File::exists($rutaProyectos)) {
             $proyectos = json_decode(File::get($rutaProyectos), true)['_embedded']['elements'] ?? [];
-            $resultadosProyectos = array_filter($proyectos, fn($p) =>
+            $resultadosProyectos = array_values(array_filter($proyectos, fn($p) =>
                 str_contains(strtolower($p['name'] ?? ''), $query) ||
                 str_contains((string) $p['id'], $query)
-            );
-        }
-
-        $rutaTareas = storage_path('app/tareas_ugr.json');
-        if (File::exists($rutaTareas)) {
-            $tareas = json_decode(File::get($rutaTareas), true)['_embedded']['elements'] ?? [];
-            $resultadosTareas = array_filter($tareas, fn($t) =>
-                str_contains(strtolower($t['subject'] ?? ''), $query) ||
-                str_contains((string) $t['id'], $query)
-            );
+            ));
         }
     }
 
-    return view('buscar', compact('query', 'resultadosProyectos', 'resultadosTareas'));
+    return view('buscar', compact('query', 'selectedEntidad', 'selectedAnio', 'entidades', 'anios', 'resultadosProyectos', 'resultadosTareas'));
 })->name('buscar');
