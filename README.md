@@ -19,7 +19,8 @@ UGR Portfolio consume la API REST de una instancia de OpenProject y presenta sus
 - **Work Packages** con filtros multidimensionales, jerarquía expandible, tiempos estimado/dedicado, paginación por familias y semáforo de salud por proyecto
 - **Calendario** interactivo con colores por tipo de estado y leyenda
 - **Exportación a PDF y CSV** del listado de tareas de cada proyecto
-- **Buscador global** de proyectos y tareas
+- **Buscador global** de proyectos y tareas con filtro por entidad solicitante y año, y resultados en tiempo real en el aside
+- **Asistente IA** en lenguaje natural para consultar los datos del Vicerrectorado (Llama 3.3 70B vía Groq)
 - **Historial de sincronizaciones** con métricas de rendimiento (solo para usuarios autenticados)
 - **Modo oscuro** completo con preferencia persistente
 - **Autenticación** de usuarios con registro y login
@@ -76,6 +77,10 @@ OPENPROJECT_URL=https://tu-instancia.openproject.com
 # Token de API personal
 # Genéralo en: tu-instancia → Mi cuenta → Token de API
 OPENPROJECT_TOKEN=tu_token_aqui
+
+# Clave de API de Groq (necesaria para el asistente IA)
+# Regístrate gratis en: https://console.groq.com
+GROQ_API_KEY=tu_clave_groq
 ```
 
 El resto de variables tienen valores por defecto listos para desarrollo local.
@@ -91,6 +96,16 @@ CACHE_STORE=file
 
 ---
 
+## Asistente IA
+
+UGR Portfolio incluye un asistente conversacional accesible desde el botón flotante del dashboard. Permite consultar los datos del Vicerrectorado en lenguaje natural.
+
+El asistente usa el modelo **Llama 3.3 70B** a través de la API de [Groq](https://groq.com), que ofrece un tier gratuito de 14.400 peticiones/día. Los datos se procesan localmente en PHP antes de enviarse — el modelo solo recibe un resumen estructurado, no los JSON completos.
+
+Requiere la variable `GROQ_API_KEY` en el `.env`.
+
+---
+
 ## Sincronización con OpenProject
 
 Con conectividad a la instancia, sincroniza proyectos y tareas:
@@ -99,7 +114,7 @@ Con conectividad a la instancia, sincroniza proyectos y tareas:
 ./vendor/bin/sail artisan ugr:update
 ```
 
-También puedes hacerlo desde el botón **"Sincronizar con OpenProject"** del dashboard una vez autenticado.
+También puedes hacerlo desde el botón **"Sincronizar con OpenProject"** del dashboard.
 
 Los datos se guardan localmente en `storage/app/` y la aplicación funciona sin conexión permanente a la API.
 
@@ -131,11 +146,17 @@ Regístrate desde el formulario en `/registro`, o por consola:
 El proyecto incluye un `Dockerfile` y un `docker-compose.prod.yml` para despliegue en producción con Nginx + PHP-FPM.
 
 ```bash
+# Eliminar datos de MySQL locales antes de construir
+sudo rm -rf docker/mysql/
+
 # Construir la imagen
-docker build -t ugr-portfolio:latest .
+DOCKER_BUILDKIT=0 docker build -t ugr-portfolio:latest .
+
+# Exportar a fichero para enviar al servidor
+docker save ugr-portfolio:latest | gzip > ugr-portfolio.tar.gz
 
 # Arrancar con las variables de entorno necesarias
-OPENPROJECT_TOKEN=tu_token docker compose -f docker-compose.prod.yml up -d
+OPENPROJECT_TOKEN=tu_token GROQ_API_KEY=tu_clave docker compose -f docker-compose.prod.yml up -d
 ```
 
 La aplicación escucha en el puerto 8080. Configura un proxy inverso (Nginx o Apache) para exponerla en la URL pública deseada.
@@ -163,6 +184,7 @@ La aplicación escucha en el puerto 8080. Configura un proxy inverso (Nginx o Ap
 | Frontend | Blade + Tailwind CSS |
 | Interactividad | Alpine.js, Chart.js, FullCalendar |
 | Base de datos | MySQL 8.4 (desarrollo) / SQLite (producción) |
+| Asistente IA | Llama 3.3 70B vía Groq API |
 | Entorno | Docker + Laravel Sail |
 | PDF | barryvdh/laravel-dompdf |
 
@@ -177,6 +199,10 @@ app/
 ├── Http/Controllers/
 │   ├── AuthController.php        # Login y logout
 │   └── ProjectController.php     # Proyectos, tareas, KPIs, PDF y CSV
+├── Services/
+│   ├── WorkPackageTreeBuilder.php # Árbol jerárquico padre-hijo
+│   ├── FamilyPaginator.php        # Paginación por familias completas
+│   └── KpiCalculator.php          # Cálculo de KPIs y semáforo de salud
 └── Models/
     ├── SyncLog.php               # Historial de sincronizaciones (fichero JSON)
     └── User.php
@@ -185,8 +211,8 @@ docker/
 ├── supervisord.conf              # Gestión de procesos
 └── entrypoint.sh                 # Inicialización del contenedor
 resources/views/
-├── layouts/app.blade.php         # Layout principal
-├── welcome.blade.php             # Dashboard
+├── layouts/app.blade.php         # Layout principal con búsqueda en tiempo real
+├── welcome.blade.php             # Dashboard con asistente IA
 ├── proyectos/                    # Vistas de proyectos y tareas
 ├── auth/                         # Login y registro
 └── errors/                       # Páginas de error personalizadas
