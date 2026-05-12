@@ -492,4 +492,167 @@
         }
     </script>
 
+    {{-- ═══════════════════════════════════════════════════════════════════════
+         ASISTENTE IA — Widget flotante en esquina inferior derecha
+         Alpine.js gestiona el estado: abierto/cerrado, historial, carga
+    ════════════════════════════════════════════════════════════════════════ --}}
+    <div x-data="{
+            abierto: false,
+            expandido: false,
+            pregunta: '',
+            mensajes: [],
+            cargando: false,
+            async enviar() {
+                const texto = this.pregunta.trim();
+                if (!texto || this.cargando) return;
+
+                this.mensajes.push({ rol: 'usuario', texto });
+                this.pregunta = '';
+                this.cargando = true;
+
+                // Scroll al fondo tras añadir mensaje
+                this.$nextTick(() => {
+                    const chat = document.getElementById('chat-mensajes');
+                    if (chat) chat.scrollTop = chat.scrollHeight;
+                });
+
+                try {
+                    const res = await fetch('/api/asistente', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ pregunta: texto })
+                    });
+                    const data = await res.json();
+                    this.mensajes.push({
+                        rol: 'asistente',
+                        texto: data.respuesta ?? data.error ?? 'Sin respuesta.'
+                    });
+                } catch (e) {
+                    this.mensajes.push({ rol: 'asistente', texto: 'Error de conexión con el asistente.' });
+                }
+
+                this.cargando = false;
+                this.$nextTick(() => {
+                    const chat = document.getElementById('chat-mensajes');
+                    if (chat) chat.scrollTop = chat.scrollHeight;
+                });
+            }
+         }"
+         @keydown.escape.window="abierto = false"
+         class="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+
+        {{-- Panel de chat --}}
+        <div x-show="abierto" x-transition
+             :class="expandido ? 'w-[680px]' : 'w-96'"
+             class="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden transition-all duration-300"
+             :style="expandido ? 'height: 680px;' : 'height: 480px;'">
+
+            {{-- Cabecera --}}
+            <div class="flex items-center justify-between px-4 py-3 bg-teal-700 dark:bg-teal-800">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 rounded-full bg-teal-300 animate-pulse"></div>
+                    <span class="text-white font-bold text-sm">Asistente UGR Portfolio</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    {{-- Botón expandir/contraer --}}
+                    <button @click="expandido = !expandido"
+                            :aria-label="expandido ? 'Contraer asistente' : 'Expandir asistente'"
+                            class="text-teal-200 hover:text-white transition"
+                            :title="expandido ? 'Contraer' : 'Expandir'">
+                        {{-- Icono expandir --}}
+                        <svg x-show="!expandido" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
+                        </svg>
+                        {{-- Icono contraer --}}
+                        <svg x-show="expandido" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M9 9V4H4m0 0l5 5M4 4l5 5m6-5h5v5m0 0l-5-5m5 5l-5-5M9 20v-5H4m0 0l5 5m-5-5l5 5m6 0l5-5v5m0 0h-5m5 0l-5-5"/>
+                        </svg>
+                    </button>
+                    <button @click="abierto = false" aria-label="Cerrar asistente"
+                            class="text-teal-200 hover:text-white transition">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            {{-- Mensajes --}}
+            <div id="chat-mensajes" class="flex-1 overflow-y-auto px-4 py-3 space-y-3 bg-gray-50 dark:bg-gray-900/50">
+
+                {{-- Mensaje de bienvenida --}}
+                <template x-if="mensajes.length === 0">
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 text-sm">
+                        <div class="text-3xl mb-2">🎓</div>
+                        <p class="font-semibold text-gray-600 dark:text-gray-300 mb-1">Pregúntame sobre los proyectos</p>
+                    </div>
+                </template>
+
+                {{-- Historial de mensajes --}}
+                <template x-for="(msg, i) in mensajes" :key="i">
+                    <div :class="msg.rol === 'usuario' ? 'flex justify-end' : 'flex justify-start'">
+                        <div :class="msg.rol === 'usuario'
+                                ? 'bg-teal-600 text-white rounded-2xl rounded-tr-sm px-4 py-2 max-w-xs text-sm'
+                                : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-200 rounded-2xl rounded-tl-sm px-4 py-2 max-w-xs text-sm'"
+                             x-text="msg.texto">
+                        </div>
+                    </div>
+                </template>
+
+                {{-- Indicador de carga --}}
+                <template x-if="cargando">
+                    <div class="flex justify-start">
+                        <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl rounded-tl-sm px-4 py-3">
+                            <div class="flex gap-1 items-center">
+                                <div class="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                                <div class="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                                <div class="w-2 h-2 bg-teal-400 rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            {{-- Input --}}
+            <div class="px-3 py-3 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 flex gap-2">
+                <input type="text"
+                       x-model="pregunta"
+                       @keydown.enter.prevent="enviar()"
+                       :disabled="cargando"
+                       placeholder="Escribe tu pregunta..."
+                       class="flex-1 text-sm border border-gray-200 dark:border-gray-600 rounded-xl px-3 py-2
+                              bg-gray-50 dark:bg-gray-700 text-gray-800 dark:text-gray-200
+                              focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition
+                              disabled:opacity-50 placeholder-gray-400">
+                <button @click="enviar()" :disabled="cargando || !pregunta.trim()"
+                        aria-label="Enviar pregunta"
+                        class="p-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-40 text-white rounded-xl transition">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        {{-- Botón flotante --}}
+        <button @click="abierto = !abierto" aria-label="Abrir asistente IA"
+                class="w-14 h-14 bg-teal-600 hover:bg-teal-700 text-white rounded-full shadow-lg
+                       flex items-center justify-center transition-all hover:scale-110 relative">
+            <svg x-show="!abierto" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3-3-3z"/>
+            </svg>
+            <svg x-show="abierto" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            {{-- Indicador de carga en el botón flotante --}}
+            <span x-show="cargando"
+                  class="absolute -top-1 -right-1 w-4 h-4 bg-amber-400 rounded-full animate-ping"></span>
+        </button>
+
+    </div>
+
 @endsection

@@ -355,3 +355,187 @@ Route::get('/buscar', function (Request $request) {
 
     return view('buscar', compact('query', 'selectedEntidad', 'selectedAnio', 'entidades', 'anios', 'resultadosProyectos', 'resultadosTareas'));
 })->name('buscar');
+// =============================================================================
+// ASISTENTE IA — POST /api/asistente
+// Recibe una pregunta en lenguaje natural, construye un resumen compacto de los
+// datos locales del Vicerrectorado y consulta a Groq (Llama 3.3 70B) para responder.
+// =============================================================================
+Route::post('/api/asistente', function (Request $request) {
+    $pregunta = trim($request->input('pregunta', ''));
+
+    if (empty($pregunta)) {
+        return response()->json(['error' => 'La pregunta no puede estar vacía.'], 422);
+    }
+
+    // 1. Cargar datos locales
+    $tareas    = [];
+    $proyectos = [];
+
+    $rutaProyectos = storage_path('app/proyectos_ugr.json');
+    $rutaTareas    = storage_path('app/tareas_ugr.json');
+
+    if (File::exists($rutaProyectos)) {
+        $proyectos = json_decode(File::get($rutaProyectos), true)['_embedded']['elements'] ?? [];
+    }
+    if (File::exists($rutaTareas)) {
+        $tareas = json_decode(File::get($rutaTareas), true)['_embedded']['elements'] ?? [];
+    }
+
+    // 2. RESÚMENES PRECALCULADOS
+    // Calculamos métricas concretas antes de pasarlas al modelo para que no tenga
+    // que inferir nada — los datos ya llegan masticados al prompt.
+    $totalProyectos = count($proyectos);
+    $totalTareas    = count($tareas);
+
+    $estadosFin     = ['H_Validado_100%', 'H_Finalizado_90%', 'S_Validada_100%', 'T_Finalizada_90%'];
+    $estadosInicio  = ['Nuev@', 'New', 'S_Planificada_5%', 'H_Planificado_5%', 'T_Planificado_5%'];
+
+    $sinAsignar   = array_filter($tareas, fn($t) => empty($t['_links']['assignee']['title'] ?? ''));
+    $finalizadas  = array_filter($tareas, fn($t) => in_array($t['_links']['status']['title'] ?? '', $estadosFin));
+    $sinIniciar   = array_filter($tareas, fn($t) => in_array($t['_links']['status']['title'] ?? '', $estadosInicio));
+
+    // Progreso medio por proyecto
+    $progresosPorProyecto = [];
+    foreach ($proyectos as $p) {
+        $tp = array_filter($tareas, fn($t) => str_ends_with($t['_links']['project']['href'] ?? '', '/'.$p['id']));
+        if (count($tp) > 0) {
+            $media = round(array_sum(array_column(array_values($tp), 'percentageDone')) / count($tp), 1);
+            $progresosPorProyecto[$p['name']] = $media;
+        }
+    }
+    asort($progresosPorProyecto); // de menor a mayor progreso
+
+    // Asignaciones por persona
+    $porPersona = [];
+    foreach ($tareas as $t) {
+        $nombre = $t['_links']['assignee']['title'] ?? null;
+        if ($nombre) $porPersona[$nombre] = ($porPersona[$nombre] ?? 0) + 1;
+    }
+    arsort($porPersona);
+
+    $resumen  = "=== RESUMEN GLOBAL ===\n";
+    $resumen .= "Proyectos totales: {$totalProyectos}\n";
+    $resumen .= "Tareas totales: {$totalTareas}\n";
+    $resumen .= "Tareas sin asignar: " . count($sinAsignar) . "\n";
+    $resumen .= "Tareas finalizadas: " . count($finalizadas) . "\n";
+    $resumen .= "Tareas sin iniciar: " . count($sinIniciar) . "\n\n";
+
+    $resumen .= "=== PROGRESO POR PROYECTO (de menor a mayor) ===\n";
+    foreach ($progresosPorProyecto as $nombre => $pct) {
+        $resumen .= "  {$nombre}: {$pct}% de media\n";
+    }
+
+    $resumen .= "\n=== TAREAS POR PERSONA (top asignados) ===\n";
+    foreach (array_slice($porPersona, 0, 10, true) as $persona => $n) {
+        $resumen .= "  {$persona}: {$n} tareas\n";
+    }
+
+    // 3. DETALLE POR PROYECTO
+    $contexto = '';
+    foreach ($proyectos as $p) {
+        $idProyecto     = $p['id'];
+        $nombreProyecto = $p['name'];
+        $tareasProyecto = array_values(array_filter($tareas, fn($t) =>
+            str_ends_with($t['_links']['project']['href'] ?? '', '/' . $idProyecto)
+        ));
+
+        if (empty($tareasProyecto)) continue;
+
+        $contexto .= "--- Proyecto: {$nombreProyecto} (ID:{$idProyecto}, " . count($tareasProyecto) . " tareas) ---\n";
+        foreach ($tareasProyecto as $t) {
+            $estado   = $t['_links']['status']['title']   ?? 'Sin estado';
+            $asignado = $t['_links']['assignee']['title'] ?? 'Sin asignar';
+            $entidad  = $t['customField3']                ?? '';
+            $progreso = $t['percentageDone']              ?? 0;
+            $inicio   = $t['startDate']                   ?? '';
+            $fin      = $t['dueDate']                     ?? '';
+            $linea    = "  #{$t['id']} [{$estado}] {$t['subject']} | asignado: {$asignado} | progreso: {$progreso}%";
+            if ($inicio) $linea .= " | inicio: {$inicio}";
+            if ($fin)    $linea .= " | fin: {$fin}";
+            if ($entidad) $linea .= " | entidad: {$entidad}";
+            $contexto .= $linea . "\n";
+        }
+        $contexto .= "\n";
+    }
+
+   // 4. TAREAS RETRASADAS PRECALCULADAS
+    $hoy = date('Y-m-d');
+    $retrasadas = array_values(array_filter($tareas, fn($t) =>
+        !empty($t['dueDate']) &&
+        $t['dueDate'] < $hoy &&
+        ($t['percentageDone'] ?? 0) < 100
+    ));
+    $resumen .= "\n=== TAREAS RETRASADAS (dueDate < hoy y progreso < 100%) ===\n";
+    $resumen .= "Total retrasadas: " . count($retrasadas) . "\n";
+    foreach ($retrasadas as $t) {
+        $proyecto = $t['_links']['project']['title'] ?? 'Sin proyecto';
+        $asignado = $t['_links']['assignee']['title'] ?? 'Sin asignar';
+        
+        $estadoRetrasada = $t['_links']['status']['title'] ?? 'Sin estado';
+        
+        $resumen .= "  #{$t['id']} [{$estadoRetrasada}] {$t['subject']} | proyecto: {$proyecto} | vencía: {$t['dueDate']} | asignado: {$asignado}\n";
+    }
+
+    // 5. Llamar a Groq API — modelo 70B con reintento automático ante rate limit (429)
+    $apiKey = env('GROQ_API_KEY');
+
+    $systemPrompt = <<<PROMPT
+Eres un asistente del Vicerrectorado de Transformación Digital de la Universidad de Granada.
+Tu única fuente de información son los datos proporcionados a continuación. Sigue estas reglas SIN EXCEPCIÓN:
+
+REGLAS:
+1. Responde SOLO con datos que aparezcan literalmente en el contexto.
+2. Si la información no está en el contexto, responde exactamente: "No tengo esa información en los datos actuales."
+3. NUNCA uses palabras como "aproximadamente", "al menos", "podría", "parece" o "estimo".
+4. Cuando cites un número, indica exactamente de qué sección del contexto lo sacas.
+5. Si confirmas que algo existe (una tarea, persona o estado), cítalo con su ID y nombre completo.
+6. No expliques tu razonamiento. Da solo el resultado final.
+7. Sé conciso. Máximo 5 líneas salvo que se pida un listado.
+8. No saludes ni te presentes. Ve directo a la respuesta.
+
+{$resumen}
+
+{$contexto}
+PROMPT;
+
+    $payload = [
+        'model'       => 'llama-3.3-70b-versatile',
+        'max_tokens'  => 512,
+        'temperature' => 0.1,
+        'messages'    => [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user',   'content' => $pregunta],
+        ],
+    ];
+
+    // Reintento con backoff exponencial ante rate limit (429)
+    $maxIntentos = 3;
+    $esperas     = [3, 7]; // segundos entre reintento 1→2 y 2→3
+    $response    = null;
+
+    for ($intento = 1; $intento <= $maxIntentos; $intento++) {
+        $response = \Illuminate\Support\Facades\Http::withHeaders([
+            'Authorization' => 'Bearer ' . $apiKey,
+            'Content-Type'  => 'application/json',
+        ])->timeout(30)->post('https://api.groq.com/openai/v1/chat/completions', $payload);
+
+        if ($response->status() !== 429) break;
+
+        // Rate limit — esperar antes del siguiente intento
+        if ($intento < $maxIntentos) {
+            sleep($esperas[$intento - 1]);
+        }
+    }
+
+    if (!$response->successful()) {
+        $codigo = $response->status();
+        $msg    = $codigo === 429
+            ? 'El asistente está ocupado por límite de peticiones. Espera unos segundos e inténtalo de nuevo.'
+            : 'Error al conectar con el asistente.';
+        return response()->json(['error' => $msg], 500);
+    }
+
+    $respuesta = $response->json('choices.0.message.content', 'Sin respuesta.');
+
+    return response()->json(['respuesta' => $respuesta]);
+})->name('api.asistente');
