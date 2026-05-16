@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use App\Helpers\AppConfig;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Cache;
@@ -15,8 +16,8 @@ class ActualizarDatosUGR extends Command
 
     public function handle()
     {
-        $baseUrl = env('OPENPROJECT_URL') . '/api/v3';
-        $token   = env('OPENPROJECT_TOKEN');
+        $baseUrl = AppConfig::get('OPENPROJECT_URL') . '/api/v3';
+        $token   = AppConfig::get('OPENPROJECT_TOKEN');
 
         if (!$token) {
             $this->error('❌ Token incorrecto o no definido en el archivo .env');

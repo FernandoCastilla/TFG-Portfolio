@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\AuthController;
 use Illuminate\Support\Facades\File;
+use App\Helpers\AppConfig;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
@@ -430,6 +431,25 @@ Route::post('/api/asistente', function (Request $request) {
         $resumen .= "  {$persona}: {$n} tareas\n";
     }
 
+    // DESGLOSE POR TIPO Y ESTADO — el modelo sabrá qué estados existen realmente
+    $resumen .= "\n=== DESGLOSE POR TIPO Y ESTADO ===\n";
+    $porTipoEstado = [];
+    foreach ($tareas as $t) {
+        $estado  = $t['_links']['status']['title'] ?? 'Sin estado';
+        $prefijo = str_starts_with($estado, 'H_') ? 'Hito'
+                 : (str_starts_with($estado, 'S_') ? 'Solicitud'
+                 : (str_starts_with($estado, 'T_') ? 'Tarea'
+                 : 'Otro'));
+        $porTipoEstado[$prefijo][$estado] = ($porTipoEstado[$prefijo][$estado] ?? 0) + 1;
+    }
+    foreach ($porTipoEstado as $tipo => $estados) {
+        $resumen .= "{$tipo}s:\n";
+        arsort($estados);
+        foreach ($estados as $estado => $n) {
+            $resumen .= "  {$estado}: {$n}\n";
+        }
+    }
+
     // 3. DETALLE POR PROYECTO
     $contexto = '';
     foreach ($proyectos as $p) {
@@ -477,21 +497,35 @@ Route::post('/api/asistente', function (Request $request) {
     }
 
     // 5. Llamar a Groq API — modelo 70B con reintento automático ante rate limit (429)
-    $apiKey = env('GROQ_API_KEY');
+    $apiKey = AppConfig::get('GROQ_API_KEY');
 
     $systemPrompt = <<<PROMPT
 Eres un asistente del Vicerrectorado de Transformación Digital de la Universidad de Granada.
 Tu única fuente de información son los datos proporcionados a continuación. Sigue estas reglas SIN EXCEPCIÓN:
 
-REGLAS:
+GLOSARIO DE ESTADOS UGR (usa siempre el nombre legible, nunca el código interno):
+- "Nuev@" → Nuevo/Nueva
+- Prefijo H_ → Hito. Ejemplos: H_Planificado_5% → "Hito planificado (5%)", H_Progreso_25% → "Hito en progreso (25%)", H_Finalizado_90% → "Hito finalizado (90%)", H_Validado_100% → "Hito validado (100%)"
+- Prefijo S_ → Solicitud. Ejemplos: S_Planificada_5% → "Solicitud planificada (5%)", S_Progreso_50% → "Solicitud en progreso (50%)", S_Validada_100% → "Solicitud validada (100%)"
+- Prefijo T_ → Tarea. Ejemplos: T_Planificado_5% → "Tarea planificada (5%)", T_Progreso_25% → "Tarea en progreso (25%)", T_Progreso_75% → "Tarea en progreso (75%)", T_Finalizada_90% → "Tarea finalizada (90%)"
+- El número al final del código es el porcentaje de progreso del estado.
+- Estados estándar de OpenProject sin prefijo (New, In progress, Confirmed, etc.) se dejan tal cual pero traducidos: New → Nuevo, In progress → En progreso, Confirmed → Confirmado, Specified → Especificado, To be scheduled → Por planificar.
+
+REGLAS DE CONTENIDO:
 1. Responde SOLO con datos que aparezcan literalmente en el contexto.
 2. Si la información no está en el contexto, responde exactamente: "No tengo esa información en los datos actuales."
 3. NUNCA uses palabras como "aproximadamente", "al menos", "podría", "parece" o "estimo".
 4. Cuando cites un número, indica exactamente de qué sección del contexto lo sacas.
-5. Si confirmas que algo existe (una tarea, persona o estado), cítalo con su ID y nombre completo.
-6. No expliques tu razonamiento. Da solo el resultado final.
-7. Sé conciso. Máximo 5 líneas salvo que se pida un listado.
-8. No saludes ni te presentes. Ve directo a la respuesta.
+5. No expliques tu razonamiento. Da solo el resultado final.
+6. No saludes ni te presentes. Ve directo a la respuesta.
+
+REGLAS DE FORMATO:
+7. Escribe siempre en español con lenguaje claro y natural, como si se lo explicaras a un responsable del Vicerrectorado.
+8. Cuando la respuesta sea un listado, usa este formato por cada elemento:
+   • Nombre de la tarea (ID: #XXX) — Proyecto: nombre del proyecto — Estado: estado legible — Asignado: nombre
+9. Si hay más de 10 elementos en un listado, muestra los 10 primeros y añade al final: "... y N más."
+10. Agrupa por proyecto cuando el listado tenga tareas de varios proyectos.
+11. Termina siempre con una línea de resumen: "En total: N tareas." o "En total: N proyectos."
 
 {$resumen}
 
@@ -539,3 +573,28 @@ PROMPT;
 
     return response()->json(['respuesta' => $respuesta]);
 })->name('api.asistente');
+// =============================================================================
+// PANEL DE CONFIGURACIÓN — /configuracion
+// Permite al usuario introducir los tokens de OpenProject y Groq
+// sin necesidad de editar ficheros del servidor.
+// Es público porque los tokens son del propio usuario.
+// =============================================================================
+Route::get('/configuracion', function () {
+    $config = AppConfig::all();
+    return view('configuracion', compact('config'));
+})->name('configuracion');
+
+Route::post('/configuracion', function (Request $request) {
+    $valores = array_filter([
+        'OPENPROJECT_URL'   => trim($request->input('openproject_url', '')),
+        'OPENPROJECT_TOKEN' => trim($request->input('openproject_token', '')),
+        'GROQ_API_KEY'      => trim($request->input('groq_api_key', '')),
+    ]);
+
+    $ok = AppConfig::save($valores);
+
+    return redirect()->route('configuracion')
+        ->with($ok ? 'success' : 'error',
+               $ok ? 'Configuración guardada correctamente.'
+                   : 'Error al guardar la configuración. Comprueba los permisos de storage/app/.');
+})->name('configuracion.guardar');

@@ -28,4 +28,7 @@ tests
 storage/logs
 storage/framework/cache
 storage/framework/sessions
-bootstrap/cachedocker/mysql/
+bootstrap/cache
+docker/mysql/
+#innodb_redo
+#ib_*
