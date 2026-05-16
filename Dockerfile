@@ -33,6 +33,9 @@ WORKDIR /var/www/html
 COPY . .
 
 # Instalar dependencias PHP (solo producción, sin paquetes de desarrollo)
+RUN mkdir -p bootstrap/cache storage/framework/sessions storage/framework/views storage/framework/cache \
+    && chmod -R 775 bootstrap/cache storage
+
 RUN composer install \
         --no-dev \
         --optimize-autoloader \
@@ -47,13 +50,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Crear directorios de storage y asignar permisos a www-data
-RUN mkdir -p \
-        storage/framework/sessions \
-        storage/framework/views \
-        storage/framework/cache \
-        bootstrap/cache \
-    && chown -R www-data:www-data storage bootstrap/cache \
-    && chmod -R 775 storage bootstrap/cache
+RUN chown -R www-data:www-data storage bootstrap/cache
 
 EXPOSE 8080
 
